@@ -2,8 +2,15 @@
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "morning-breath",
   "compatibility_date": "2026-06-30",
+  "main": "./worker/index.js",
   "assets": {
     "directory": "./dist",
     "not_found_handling": "single-page-application"
-  }
+  },
+  "kv_namespaces": [
+    {
+      "binding": "HOLD_HISTORY",
+      "id": "REPLACE_WITH_YOUR_NAMESPACE_ID"
+    }
+  ]
 }
