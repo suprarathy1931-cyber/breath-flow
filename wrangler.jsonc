@@ -1,6 +1,6 @@
 {
   "$schema": "node_modules/wrangler/config-schema.json",
-  "name": "morning-breath",
+  "name": "breath-flow",
   "compatibility_date": "2026-06-30",
   "main": "./worker/index.js",
   "assets": {
