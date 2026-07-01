@@ -298,7 +298,7 @@ function TopBar({ onBack, title, accent, soundOn, setSoundOn }) {
 // ============================================================
 // HOME SCREEN
 // ============================================================
-function HomeScreen({ onSelect, completedToday, soundOn, setSoundOn, holdHistory }) {
+function HomeScreen({ onSelect, completedToday, soundOn, setSoundOn, holdHistory, holdsLoaded }) {
   const bestHold = holdHistory.length ? Math.max(...holdHistory.map(h => h.seconds)) : null;
   const lastHold = holdHistory.length ? holdHistory[holdHistory.length - 1] : null;
 
@@ -330,7 +330,21 @@ function HomeScreen({ onSelect, completedToday, soundOn, setSoundOn, holdHistory
       </div>
 
       {/* Breath hold stat strip */}
-      {bestHold !== null && (
+      {!holdsLoaded && (
+        <div style={{
+          display: 'flex', gap: 10, margin: '10px 2px 18px',
+        }}>
+          <div style={{ flex: 1, background: PALETTE.cream, borderRadius: 14, padding: '12px 14px', opacity: 0.5 }}>
+            <div style={{ fontSize: 11, color: PALETTE.inkSoft, textTransform: 'uppercase', letterSpacing: 0.5 }}>Best hold</div>
+            <div style={{ fontFamily: "'Fraunces', Georgia, serif", fontSize: 22, fontWeight: 600, color: PALETTE.inkSoft }}>···</div>
+          </div>
+          <div style={{ flex: 1, background: PALETTE.cream, borderRadius: 14, padding: '12px 14px', opacity: 0.5 }}>
+            <div style={{ fontSize: 11, color: PALETTE.inkSoft, textTransform: 'uppercase', letterSpacing: 0.5 }}>Last hold</div>
+            <div style={{ fontFamily: "'Fraunces', Georgia, serif", fontSize: 22, fontWeight: 600, color: PALETTE.inkSoft }}>···</div>
+          </div>
+        </div>
+      )}
+      {holdsLoaded && bestHold !== null && (
         <div style={{
           display: 'flex', gap: 10, margin: '10px 2px 18px',
         }}>
@@ -487,7 +501,7 @@ function RoundTracker({ current, total, onReset, accent, label = 'Round' }) {
 // ============================================================
 // COMPLETION SCREEN
 // ============================================================
-function CompletionScreen({ exercise, onDone, summary }) {
+function CompletionScreen({ exercise, onDone, summary, notice }) {
   return (
     <div style={{
       display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center',
@@ -505,15 +519,23 @@ function CompletionScreen({ exercise, onDone, summary }) {
         {exercise.name} complete
       </div>
       {summary && (
-        <div style={{ fontSize: 14, color: PALETTE.inkSoft, marginBottom: 28, maxWidth: 280, lineHeight: 1.5 }}>
+        <div style={{ fontSize: 14, color: PALETTE.inkSoft, marginBottom: notice ? 14 : 28, maxWidth: 280, lineHeight: 1.5 }}>
           {summary}
+        </div>
+      )}
+      {notice && (
+        <div style={{
+          fontSize: 12.5, color: PALETTE.accentApnea, background: `${PALETTE.accentApnea}14`,
+          borderRadius: 10, padding: '9px 14px', marginBottom: 28, maxWidth: 280, lineHeight: 1.45,
+        }}>
+          {notice}
         </div>
       )}
       <button
         onClick={onDone}
         style={{
           background: exercise.accent, color: '#fff', border: 'none', borderRadius: 14,
-          padding: '14px 32px', fontSize: 15, fontWeight: 600, cursor: 'pointer', marginTop: summary ? 0 : 28,
+          padding: '14px 32px', fontSize: 15, fontWeight: 600, cursor: 'pointer', marginTop: (summary || notice) ? 0 : 28,
         }}
       >
         Back to session
@@ -1123,7 +1145,7 @@ function BoxTimer({ phaseIdx, progress, accent, countLeft, label }) {
 // ============================================================
 // 4. STATIC BREATH HOLD — stopwatch counting up, manual stop
 // ============================================================
-function StaticHoldScreen({ exercise, soundOn, sounds, onComplete, holdHistory, addHoldRecord }) {
+function StaticHoldScreen({ exercise, soundOn, sounds, onComplete, holdHistory, addHoldRecord, holdSaveError }) {
   const [phase, setPhase] = useState('ready'); // ready | holding | done
   const [elapsedMs, setElapsedMs] = useState(0);
   const intervalRef = useRef(null);
@@ -1162,6 +1184,7 @@ function StaticHoldScreen({ exercise, soundOn, sounds, onComplete, holdHistory, 
       <CompletionScreen
         exercise={exercise}
         summary={`You held for ${seconds} seconds${bestHold && seconds >= bestHold ? ' — a new best!' : ''}`}
+        notice={holdSaveError ? "Couldn't save this to your history — it's only kept for this session. Check your connection and try the next one." : null}
         onDone={onComplete}
       />
     );
@@ -1467,7 +1490,35 @@ export default function BreathFlowApp() {
   const [completedToday, setCompletedToday] = useState([]);
   const [soundOn, setSoundOn] = useState(true);
   const [holdHistory, setHoldHistory] = useState([]);
+  const [holdsLoaded, setHoldsLoaded] = useState(false);
+  const [holdSaveError, setHoldSaveError] = useState(false);
   const { sounds, unlock } = useAudioEngine();
+
+  // Pull saved breath-hold history from Cloudflare KV (via the Worker's
+  // /api/holds route) on first load, so "best hold" survives a refresh.
+  useEffect(() => {
+    let cancelled = false;
+    fetch('/api/holds')
+      .then(res => {
+        if (!res.ok) throw new Error(`Failed to load holds: ${res.status}`);
+        return res.json();
+      })
+      .then(data => {
+        if (cancelled) return;
+        if (Array.isArray(data.holdHistory)) {
+          setHoldHistory(data.holdHistory);
+        }
+      })
+      .catch(() => {
+        // No saved history reachable (offline, API not deployed yet, etc).
+        // Fall back to an empty list rather than blocking the app — the
+        // person can still use every exercise, they just start at zero.
+      })
+      .finally(() => {
+        if (!cancelled) setHoldsLoaded(true);
+      });
+    return () => { cancelled = true; };
+  }, []);
 
   const handleSelect = (ex) => {
     unlock();
@@ -1488,10 +1539,32 @@ export default function BreathFlowApp() {
     setActiveExercise(null);
   };
 
-  const addHoldRecord = (seconds) => {
-    const today = new Date();
-    const dateStr = `${today.getMonth() + 1}/${today.getDate()}`;
-    setHoldHistory(prev => [...prev, { seconds, date: dateStr }]);
+  // Saves a hold to Cloudflare KV via the Worker API. Updates local state
+  // from the server's response so it never drifts from what's actually
+  // persisted. If the request fails, the hold still gets appended locally
+  // (so it's not lost for the rest of this session) and holdSaveError is
+  // set so the UI can flag that this particular one didn't make it to KV.
+  const addHoldRecord = async (seconds) => {
+    setHoldSaveError(false);
+    try {
+      const res = await fetch('/api/holds', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ seconds }),
+      });
+      if (!res.ok) throw new Error(`Save failed: ${res.status}`);
+      const data = await res.json();
+      if (Array.isArray(data.holdHistory)) {
+        setHoldHistory(data.holdHistory);
+        return;
+      }
+      throw new Error('Malformed response from save');
+    } catch {
+      const today = new Date();
+      const dateStr = `${today.getMonth() + 1}/${today.getDate()}`;
+      setHoldHistory(prev => [...prev, { seconds, date: dateStr }]);
+      setHoldSaveError(true);
+    }
   };
 
   return (
@@ -1577,6 +1650,7 @@ export default function BreathFlowApp() {
           soundOn={soundOn}
           setSoundOn={setSoundOn}
           holdHistory={holdHistory}
+          holdsLoaded={holdsLoaded}
         />
       )}
 
@@ -1597,6 +1671,7 @@ export default function BreathFlowApp() {
               onComplete={handleExerciseComplete}
               holdHistory={holdHistory}
               addHoldRecord={addHoldRecord}
+              holdSaveError={holdSaveError}
             />
           ) : (
             <ExerciseScreen
